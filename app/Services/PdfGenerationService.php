@@ -1,0 +1,272 @@
+<?php
+
+namespace App\Services;
+
+use App\Contracts\Services\DocumentGenerationServiceInterface;
+use App\Contracts\Templates\DocumentTemplateInterface;
+use App\Enum\DocumentStatus;
+use App\Enum\DocumentType;
+use App\Models\Generated_Document;
+use App\Models\User;
+use App\Services\Templates\TemplateManager;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
+
+class PdfGenerationService implements DocumentGenerationServiceInterface
+{
+    private const DOCUMENT_PREFIX = 'UCAK';
+    private const QR_CODE_SIZE = 150;
+    private const WATERMARK_OPACITY = 0.1;
+
+    public function __construct(
+        private TemplateManager $templateManager,
+        private string $storageDisk = 'documents'
+    ) {}
+
+    public function generate(
+        User $student,
+        DocumentType $type,
+        User $generatedBy,
+        array $templateData,
+        ?bool $withWatermark = false,
+        ?bool $withQrCode = false
+    ): Generated_Document {
+        // Get template for document type
+        $template = $this->templateManager->get($type);
+
+        // Validate template data
+        if (!$template->validateData($templateData)) {
+            throw new \InvalidArgumentException('Invalid template data provided');
+        }
+
+        // Generate secure document number
+        $documentNumber = $this->generateDocumentNumber($type);
+
+        // Prepare data for template
+        $processedData = $template->processData(array_merge($templateData, [
+            'student' => $student,
+            'document_number' => $documentNumber,
+            'generated_by' => $generatedBy,
+            'generated_at' => now(),
+            'with_qr_code' => $withQrCode,
+            'with_watermark' => $withWatermark,
+        ]));
+
+        // Add UCAK branding data
+        $processedData['branding'] = $this->getBrandingData();
+
+        // Generate QR code if requested
+        if ($withQrCode) {
+            $processedData['qr_code'] = $this->generateQrCode($documentNumber, $student);
+        }
+
+        // Generate PDF
+        $pdf = $this->generatePdf($template, $processedData, $withWatermark);
+
+        // Store PDF file
+        $filePath = $this->storePdf($pdf, $type, $documentNumber);
+
+        // Create document record
+        $document = Generated_Document::create([
+            'student_id' => $student->id,
+            'type' => $type,
+            'document_number' => $documentNumber,
+            'file_path' => $filePath,
+            'generated_by' => $generatedBy->id,
+            'metadata' => $this->prepareMetadata($processedData, $withWatermark, $withQrCode),
+            'status' => DocumentStatus::DRAFT,
+            'generated_at' => now(),
+        ]);
+
+        return $document;
+    }
+
+    private function generatePdf(
+        DocumentTemplateInterface $template,
+        array $data,
+        bool $withWatermark
+    ): \Barryvdh\DomPDF\PDF {
+        $pdf = Pdf::loadView($template->getView(), $data);
+
+        // Set PDF options
+        $pdf->setPaper('A4', 'portrait');
+        $pdf->setOption('defaultFont', 'DejaVu Sans');
+        $pdf->setOption('isHtml5ParserEnabled', true);
+        $pdf->setOption('isRemoteEnabled', true);
+        $pdf->setOption('isPhpEnabled', true);
+
+        // Add watermark if requested
+        if ($withWatermark) {
+            $this->addWatermark($pdf);
+        }
+
+        return $pdf;
+    }
+
+    private function addWatermark(\Barryvdh\DomPDF\PDF $pdf): void
+    {
+        $watermarkSvg = view('pdf.watermark', [
+            'text' => 'UCAK OFFICIAL',
+            'opacity' => self::WATERMARK_OPACITY,
+        ])->render();
+
+        $pdf->setOption('header-html', $watermarkSvg);
+        $pdf->setOption('footer-html', $watermarkSvg);
+    }
+
+    private function generateQrCode(string $documentNumber, User $student): string
+    {
+        $verificationUrl = route('documents.verify', [
+            'number' => $documentNumber,
+            'student_id' => $student->id,
+        ]);
+
+        return 'data:image/svg+xml;base64,' . base64_encode(
+                QrCode::size(self::QR_CODE_SIZE)
+                    ->format('svg')
+                    ->generate($verificationUrl)
+            );
+    }
+
+    private function storePdf(
+        \Barryvdh\DomPDF\PDF $pdf,
+        DocumentType $type,
+        string $documentNumber
+    ): string {
+        $path = $this->getStoragePath($type, $documentNumber);
+
+        Storage::disk($this->storageDisk)->put($path, $pdf->output());
+
+        return $path;
+    }
+
+    public function getStoragePath(DocumentType $type, string $documentNumber): string
+    {
+        $date = now()->format('Y/m/d');
+        $filename = "{$documentNumber}.pdf";
+
+        return "{$type->value}/{$date}/{$filename}";
+    }
+
+    public function generateDocumentNumber(DocumentType $type): string
+    {
+        $timestamp = now()->format('YmdHis');
+        $random = Str::random(6);
+        $typeCode = strtoupper(substr($type->value, 0, 3));
+
+        return self::DOCUMENT_PREFIX . "-{$typeCode}-{$timestamp}-{$random}";
+    }
+
+    private function getBrandingData(): array
+    {
+        return [
+            'name' => 'UCAK University',
+            'logo' => storage_path('app/branding/logo.png'),
+            'address' => '123 University Ave, City, Country',
+            'website' => 'https://ucak.edu.tr',
+            'phone' => '+90 212 123 4567',
+            'email' => 'info@ucak.edu.tr',
+            'colors' => [
+                'primary' => '#1a365d',
+                'secondary' => '#2d3748',
+                'accent' => '#3182ce',
+            ],
+        ];
+    }
+
+    private function prepareMetadata(
+        array $data,
+        bool $withWatermark,
+        bool $withQrCode
+    ): array {
+        return [
+            'generation_data' => [
+                'with_watermark' => $withWatermark,
+                'with_qr_code' => $withQrCode,
+                'template' => $data['template_name'] ?? null,
+                'version' => '1.0',
+            ],
+            'security' => [
+                'hash' => hash('sha256', json_encode($data)),
+                'timestamp' => now()->toISOString(),
+            ],
+            'data_snapshot' => [
+                'student_name' => $data['student']->name ?? null,
+                'document_type' => $data['document_type'] ?? null,
+            ],
+        ];
+    }
+
+    public function find(string $documentNumber): ?Generated_Document
+    {
+        return Generated_Document::where('document_number', $documentNumber)->first();
+    }
+
+    public function verify(string $documentNumber, array $verificationData = []): bool
+    {
+        $document = $this->find($documentNumber);
+
+        if (!$document) {
+            return false;
+        }
+
+        // Check if document is valid
+        if ($document->status !== DocumentStatus::ISSUED) {
+            return false;
+        }
+
+        // Check if student ID matches
+        if (isset($verificationData['student_id'])) {
+            return $document->student_id === $verificationData['student_id'];
+        }
+
+        // Additional verification logic can be added here
+
+        return true;
+    }
+
+    /**
+     * Issue a generated document
+     */
+    public function issue(string $documentNumber): Generated_Document
+    {
+        $document = $this->find($documentNumber);
+
+        if (!$document) {
+            throw new \InvalidArgumentException('Document not found');
+        }
+
+        if ($document->status !== DocumentStatus::DRAFT) {
+            throw new \InvalidArgumentException('Document cannot be issued');
+        }
+
+        $document->update([
+            'status' => DocumentStatus::ISSUED,
+            'issued_at' => now(),
+        ]);
+
+        return $document->fresh();
+    }
+
+    /**
+     * Get document download URL
+     */
+    public function getDownloadUrl(Generated_Document $document): string
+    {
+        return Storage::disk($this->storageDisk)->url($document->file_path);
+    }
+
+    /**
+     * Get document as base64
+     */
+    public function getAsBase64(Generated_Document $document): string
+    {
+        $content = Storage::disk($this->storageDisk)->get($document->file_path);
+
+        return base64_encode($content);
+    }
+}
+

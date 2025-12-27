@@ -17,6 +17,7 @@
         "laravel/tinker": "^2.10.1",
         "maatwebsite/excel": "*",
         "robsontenorio/laravel-keycloak-guard": "*",
+        "simplesoftwareio/simple-qrcode": "^4.2",
         "spatie/laravel-permission": "*",
         "spatie/laravel-query-builder": "*"
     },

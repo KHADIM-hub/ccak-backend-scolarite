@@ -61,3 +61,19 @@ Backend API for the CCAK scolarité platform, built with Laravel 12, PostgreSQL,
   2) Create client `backend` with Authorization Code (PKCE) and/or Client Credentials; set redirect URIs/web origins for your frontend if needed.
   3) Ensure tokens include `resource_access` for your client (e.g., `ccak-backend`), or set `KEYCLOAK_IGNORE_RESOURCES_VALIDATION=true`.
   4) Map realm/client roles into token (claims `realm_access.roles`, `resource_access`); set `KEYCLOAK_SYNC_ROLES=true` if you want them synced to Spatie Permission.
+
+## Contributing (Fork After You Already Cloned)
+If you already cloned this repo and created local branches, you can still fork and push your work to your fork:
+
+1) Create the fork on GitHub (click Fork).
+2) In the existing local repo:
+   ```bash
+   git remote -v
+   git remote add fork git@github.com:<their-username>/ccak-backend-scolarite.git
+   # or https://github.com/<their-username>/ccak-backend-scolarite.git
+   ```
+3) Push your local branches to the fork:
+   ```bash
+   git push -u fork <branch-name>
+   ```
+4) Open a Pull Request from your fork/branch to `develop` in this repo.
